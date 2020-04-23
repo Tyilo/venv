@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+import os
+import subprocess
+import sys
+import argparse
+from pathlib import Path
+import hashlib
+import shutil
+
+
+def is_project_dir(d):
+    FILES = ["pyproject.toml", "requirements.txt"]
+    for f in FILES:
+        if (d / f).is_file():
+            return True
+
+    return False
+
+
+def get_project_path(d):
+    while True:
+        if is_project_dir(d):
+            return d
+
+        if d.parent == d:
+            return None
+
+        d = d.parent
+
+
+def get_venv_path(project_path):
+    CACHE_DIR = Path.home() / ".cache" / "venvs"
+    HASH_LENGTH = 10
+    hash = hashlib.sha256(bytes(project_path)).hexdigest()[:HASH_LENGTH]
+    return CACHE_DIR / f"{project_path.name}-{hash}"
+
+
+def confirm(prompt):
+    prompt += " [y/N] "
+    ans = input(prompt).lower()[:1]
+    return ans == "y"
+
+
+def remove_venv(venv_path):
+    shutil.rmtree(venv_path)
+
+
+def run_in_venv(venv_path, args, **kwargs):
+    env = os.environ.copy()
+    env["VIRTUAL_ENV"] = venv_path
+    env["PATH"] = str(venv_path / "bin") + ":" + os.getenv("PATH")
+    env.pop("PYTHONHOME", None)
+    p = subprocess.run(args, env=env, **kwargs)
+    return p
+
+
+def init_cmd(args):
+    if args.venv_path.exists():
+        if not confirm("venv already exists for project. Recreate?"):
+            return 1
+
+        remove_venv(args.venv_path)
+
+    subprocess.run(
+        ["virtualenv", "--", args.venv_path], stdout=subprocess.DEVNULL, check=True
+    )
+
+    print("Created venv at", args.venv_path)
+
+
+def rm_cmd(args):
+    try:
+        remove_venv(args.venv_path)
+        print("Removed venv at", args.venv_path)
+    except FileNotFoundError:
+        print("venv not found for project", file=sys.stderr)
+        return 1
+
+
+def info_cmd(args):
+    print("Project path:", args.project_path)
+    if not args.venv_path.exists():
+        print("venv doesn't exist")
+        return
+
+    print("venv path:", args.venv_path)
+
+
+def run_cmd(args):
+    cwd = None
+    if args.root:
+        cwd = args.project_path
+
+    p = run_in_venv(args.venv_path, args.args, cwd=cwd)
+    return p.returncode
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="manages venvs based on the current project directory"
+    )
+    subparsers = parser.add_subparsers(dest="cmd", required=True)
+
+    init_parser = subparsers.add_parser("init", help="creates a new venv")
+    init_parser.add_argument("--python", help="python interpreter to use")
+    init_parser.set_defaults(func=init_cmd)
+
+    rm_parser = subparsers.add_parser("rm", help="removes the venv")
+    rm_parser.set_defaults(func=rm_cmd)
+
+    info_parser = subparsers.add_parser("info", help="displays info for the venv")
+    info_parser.set_defaults(func=info_cmd)
+
+    run_parser = subparsers.add_parser("run", help="runs a command inside the venv")
+    run_parser.add_argument("args", nargs=argparse.REMAINDER)
+    run_parser.add_argument(
+        "-r", "--root", help="run command at root of project", action="store_true"
+    )
+    run_parser.set_defaults(func=run_cmd)
+
+    args = parser.parse_args()
+
+    d = Path().absolute()
+    args.project_path = get_project_path(d)
+    if not args.project_path:
+        print(f"Could not find project path", file=sys.stderr)
+        return 1
+
+    args.venv_path = get_venv_path(args.project_path)
+
+    return args.func(args)
+
+
+sys.exit(main())
